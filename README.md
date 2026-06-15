@@ -10,7 +10,7 @@ developing EtherCAT MainDevices.
 This library is specifically designed for real-time communication in
 embedded systems. Its lightweight architecture minimizes resource
 consumption, making it suitable for environments with limited
-resources. SOEM can also be utilized on both Linux and Windows
+resources. SOEM can also be utilized on Linux, Windows and Darwin/macOS
 systems.
 
 As a library rather than a standalone application, SOEM provides
@@ -20,6 +20,25 @@ EtherCAT technology.
 # Documentation
 
 See https://docs.rt-labs.com/soem
+
+# Darwin/macOS notes
+
+The Darwin backend uses BPF (`/dev/bpf*`) because macOS does not provide
+Linux-style `PF_PACKET` raw sockets. Build and adapter discovery work as a
+normal user, but opening a BPF descriptor for EtherCAT traffic normally requires
+root privileges:
+
+```sh
+cmake --preset darwin-arm64
+cmake --build --preset darwin-arm64
+build/darwin-arm64/bin/slaveinfo
+sudo build/darwin-arm64/bin/slaveinfo en0
+```
+
+Replace `en0` with the Ethernet interface that is connected to the EtherCAT
+segment. On macOS, the backend sends and receives complete Ethernet frames via
+BPF, requests immediate-mode reads, requests complete-link-layer writes and
+uses inbound-only BPF direction when the operating system supports it.
 
 # Contributions
 

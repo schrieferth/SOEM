@@ -20,10 +20,40 @@
   }, {
     "name": "default",
     "inherits" : "base"
+  }, {
+    "name": "darwin-arm64",
+    "inherits": "base",
+    "condition": {
+      "type": "equals",
+      "lhs": "${hostSystemName}",
+      "rhs": "Darwin"
+    },
+    "cacheVariables": {
+      "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+      "CMAKE_OSX_ARCHITECTURES": "arm64"
+    }
+  }, {
+    "name": "darwin-x86_64",
+    "inherits": "base",
+    "condition": {
+      "type": "equals",
+      "lhs": "${hostSystemName}",
+      "rhs": "Darwin"
+    },
+    "cacheVariables": {
+      "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+      "CMAKE_OSX_ARCHITECTURES": "x86_64"
+    }
   }],
   "buildPresets": [{
     "name": "default",
     "configurePreset": "default"
+  }, {
+    "name": "darwin-arm64",
+    "configurePreset": "darwin-arm64"
+  }, {
+    "name": "darwin-x86_64",
+    "configurePreset": "darwin-x86_64"
   }, {
     "name": "docs",
     "configurePreset": "docs",
@@ -34,6 +64,18 @@
     "configurePreset": "default",
     "generators": [
       "ZIP"
+    ]
+  }, {
+    "name": "darwin-arm64",
+    "configurePreset": "darwin-arm64",
+    "generators": [
+      "TGZ"
+    ]
+  }, {
+    "name": "darwin-x86_64",
+    "configurePreset": "darwin-x86_64",
+    "generators": [
+      "TGZ"
     ]
   }]
 }
