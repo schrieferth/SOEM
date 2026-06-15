@@ -396,6 +396,8 @@ int ecx_outframe_red(ecx_portt *port, uint8 idx)
    return rval;
 }
 
+static int ecx_is_self_transmitted_frame(const ec_etherheadert *ehp);
+
 static int ecx_next_bpf_frame(uint8 *bpfbuf, int *bpfbufpos, int *bpfbufused, ec_bufT *tempbuf)
 {
    while (*bpfbufpos < *bpfbufused)
@@ -409,7 +411,7 @@ static int ecx_next_bpf_frame(uint8 *bpfbuf, int *bpfbufpos, int *bpfbufused, ec
       if ((framelen >= (int)ETH_HEADERSIZE) && (framelen <= (int)sizeof(ec_bufT)))
       {
          ec_etherheadert *ehp = (ec_etherheadert *)frame;
-         if (ehp->etype == htons(ETH_P_ECAT))
+         if ((ehp->etype == htons(ETH_P_ECAT)) && !ecx_is_self_transmitted_frame(ehp))
          {
             memcpy(tempbuf, frame, (size_t)framelen);
             return framelen;
@@ -420,6 +422,16 @@ static int ecx_next_bpf_frame(uint8 *bpfbuf, int *bpfbufpos, int *bpfbufused, ec
    *bpfbufpos = 0;
    *bpfbufused = 0;
    return 0;
+}
+
+static int ecx_is_self_transmitted_frame(const ec_etherheadert *ehp)
+{
+   return ((ehp->sa0 == htons(priMAC[0])) &&
+           (ehp->sa1 == htons(priMAC[1])) &&
+           (ehp->sa2 == htons(priMAC[2]))) ||
+          ((ehp->sa0 == htons(secMAC[0])) &&
+           (ehp->sa1 == htons(secMAC[1])) &&
+           (ehp->sa2 == htons(secMAC[2])));
 }
 
 /** Non blocking read of socket. Put frame in temporary buffer.
