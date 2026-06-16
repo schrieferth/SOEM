@@ -18,7 +18,13 @@ from threading import Thread
 import unittest
 from http.server import ThreadingHTTPServer
 
-from soem_gateway import GatewayConfig, GatewayHandler, SoemGateway
+from soem_gateway import (
+    GatewayConfig,
+    GatewayHandler,
+    SoemGateway,
+    _slaveinfo_configured_ok,
+    _slaveinfo_has_error,
+)
 
 
 # A standalone stand-in for the real soem_pdo_server C helper: same line protocol
@@ -193,6 +199,25 @@ class ProcessDataTests(unittest.TestCase):
             stopped = gateway.stop()
             self.assertTrue(stopped["ok"])
             self.assertEqual(gateway.state.status()["master_status"], "STOPPED")
+
+
+class InventoryErrorDetectionTests(unittest.TestCase):
+    """A successful enumeration must not be flagged because of benign CoE probes."""
+
+    def test_sdo_probe_note_is_not_an_inventory_error(self) -> None:
+        out = (
+            "Time:1781624623.404 SDO slave:4 index:1c13.01 error:06090011 Subindex does not exist\n"
+            "6 slaves found and configured.\n"
+            "Slave:1\n Name:EK1101\n"
+        )
+        self.assertTrue(_slaveinfo_configured_ok(out))
+        self.assertFalse(_slaveinfo_has_error(out, ""))
+
+    def test_real_failures_are_still_flagged(self) -> None:
+        self.assertTrue(_slaveinfo_has_error("No slaves found", ""))
+        self.assertTrue(_slaveinfo_has_error("No socket connection on eth0\nExcecute as root", ""))
+        # A hard error during an otherwise-found run is still a failure.
+        self.assertTrue(_slaveinfo_has_error("6 slaves found and configured.\nbus timeout", ""))
 
 
 if __name__ == "__main__":

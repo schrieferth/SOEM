@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -1151,22 +1152,49 @@ def _parse_slave_count(stdout: str) -> int | None:
     return None
 
 
+# Hard failures that mean the bus could not be used at all.
+_HARD_ERROR_MARKERS = (
+    "no socket connection",
+    "excecute as root",
+    "execute as root",
+    "no slaves found",
+    "timeout",
+)
+# Benign CoE SDO object-probe aborts such as
+# 'Time:... SDO slave:4 index:1c13.01 error:06090011 Subindex does not exist'.
+# slaveinfo emits these for objects a slave does not implement; they are
+# diagnostics, not a bus/communication failure.
+_SDO_PROBE_ERROR = re.compile(r"index:[0-9a-fx.]+\s+error:[0-9a-f]+", re.IGNORECASE)
+_SLAVEINFO_CONFIGURED = re.compile(r"(\d+)\s+slaves found and configured", re.IGNORECASE)
+
+
+def _slaveinfo_configured_ok(stdout: str) -> bool:
+    """Return True when slaveinfo reports a successful enumeration (N > 0)."""
+
+    match = _SLAVEINFO_CONFIGURED.search(stdout or "")
+    return bool(match) and int(match.group(1)) > 0
+
+
 def _slaveinfo_has_error(stdout: str, stderr: str) -> bool:
-    combined = f"{stdout}\n{stderr}".lower()
+    combined = f"{stdout}\n{stderr}"
+    # A successful enumeration is authoritative: per-object SDO probe notes do
+    # not turn a found-and-configured bus into a failed inventory.
+    if _slaveinfo_configured_ok(stdout):
+        return _text_has_hard_error(combined)
     return _text_has_soem_error(combined)
 
 
+def _text_has_hard_error(text: str) -> bool:
+    lower = text.lower()
+    return any(marker in lower for marker in _HARD_ERROR_MARKERS)
+
+
 def _text_has_soem_error(text: str) -> bool:
-    combined = text.lower()
-    error_markers = (
-        "no socket connection",
-        "excecute as root",
-        "execute as root",
-        "no slaves found",
-        "error",
-        "timeout",
-    )
-    return any(marker in combined for marker in error_markers)
+    if _text_has_hard_error(text):
+        return True
+    # Generic 'error', but ignore benign CoE SDO object-probe aborts.
+    cleaned = _SDO_PROBE_ERROR.sub("", text.lower())
+    return "error" in cleaned
 
 
 def _master_status(running: bool, last_error: str | None, log_tail: list[str]) -> str:
