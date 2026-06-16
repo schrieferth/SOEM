@@ -19,7 +19,20 @@ EtherCAT technology.
 
 # Documentation
 
-See https://docs.rt-labs.com/soem
+Upstream SOEM core documentation: https://docs.rt-labs.com/soem
+
+This fork's additions — the Darwin/macOS port and the external-process HTTP
+gateway — have their own structured documentation under [`docs/`](docs/index.md):
+
+* [Concepts](docs/concepts/index.md) — architecture, gateway boundary, raw SDO
+  transport, platform strategy.
+* [Gateway](docs/gateway/index.md) — install, usage (start/stop), full HTTP API,
+  runtime configuration, SDO, subscriptions, troubleshooting.
+* [macOS Ports](docs/ports/index.md) — `darwin-arm64` / `darwin-x86_64` builds and
+  the BPF runtime model.
+* [Decision records](docs/adr/index.md).
+
+Build it with `cd docs && make html` (Sphinx + MyST, like the Testknecht docs).
 
 # Darwin/macOS notes
 

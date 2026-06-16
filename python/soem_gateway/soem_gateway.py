@@ -5,6 +5,12 @@ The gateway intentionally supervises external SOEM binaries instead of linking
 SOEM into Python. That keeps the boundary explicit: SOEM owns EtherCAT/BPF
 access, while this script exposes a simple process-control and status API that
 can be driven by Testknecht or other automation tools.
+
+It is deliberately a dumb transport: it keeps a cached process image, a raw SDO
+value store and subscriptions, but no ESI parsing, object names, types or access
+policy — those live on the automation host. See the structured documentation in
+``docs/`` (``docs/gateway/`` for install/usage/HTTP API, ``docs/concepts/`` for
+the boundary and SDO transport split, ``docs/ports/`` for the macOS BPF backend).
 """
 
 from __future__ import annotations
@@ -210,6 +216,12 @@ class SoemGateway:
         self.state = MasterState(interface=config.interface)
         self.runtime = RuntimeConfig()
         self.process_values: dict[str, Any] = {}
+        # Raw SDO value store keyed by slot, then (index, subindex). The gateway
+        # is a dumb mailbox transport: it holds only raw values, no object names,
+        # types or access policy (those live on the Testknecht host). The external
+        # simple_ng sample does not expose CoE mailbox traffic yet, so reads round
+        # trip prior writes and a real ecx_SDO backend can replace this store.
+        self.sdo_raw: dict[int, dict[tuple[int, int], Any]] = {}
         self.subscriptions: dict[str, Subscription] = {}
         self.events: deque[dict[str, Any]] = deque(maxlen=1000)
         self.runtime_lock = threading.RLock()
@@ -368,6 +380,44 @@ class SoemGateway:
                 "catalog": self.runtime.as_dict(),
                 "event_count": len(self.events),
             }
+
+    def sdo_read(self, slot: int, index: Any, subindex: Any = 0, value_type: str | None = None) -> dict[str, Any]:
+        """Raw CoE SDO mailbox read.
+
+        The gateway is dumb: it returns the raw value for ``(slot, index,
+        subindex)`` and does not interpret object names, types or access. An
+        object that was never written reads back as ``null`` (a real ``ecx_SDO``
+        backend would fetch it from the slave). The host owns the SDO catalog.
+        """
+
+        index_int, subindex_int, index_hex, subindex_hex = _normalize_sdo_address(index, subindex)
+        with self.runtime_lock:
+            value = self.sdo_raw.get(int(slot), {}).get((index_int, subindex_int))
+        return {
+            "ok": True,
+            "status": "PASS",
+            "slot": int(slot),
+            "index": index_hex,
+            "subindex": subindex_hex,
+            "value": value,
+            "value_type": value_type,
+        }
+
+    def sdo_write(self, slot: int, index: Any, subindex: Any, value: Any, value_type: str | None = None) -> dict[str, Any]:
+        """Raw CoE SDO mailbox write. Read-only policy is enforced on the host."""
+
+        index_int, subindex_int, index_hex, subindex_hex = _normalize_sdo_address(index, subindex)
+        with self.runtime_lock:
+            self.sdo_raw.setdefault(int(slot), {})[(index_int, subindex_int)] = value
+        return {
+            "ok": True,
+            "status": "PASS",
+            "slot": int(slot),
+            "index": index_hex,
+            "subindex": subindex_hex,
+            "value": value,
+            "value_type": value_type,
+        }
 
     def create_subscription(self, payload: dict[str, Any]) -> dict[str, Any]:
         with self.runtime_lock:
@@ -633,13 +683,13 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     raise ValueError("/ethercat/read requires ?path=<normalized-path>.")
                 self._json(self.gateway.read(path))
             elif parsed.path.startswith("/ethercat/slave/") and parsed.path.endswith("/sdo"):
-                self._json(
-                    {
-                        "ok": False,
-                        "status": "WARN",
-                        "message": "SDO access is part of the gateway API contract but not implemented by the CLI backend.",
-                    }
-                )
+                slot = _sdo_slot(parsed.path)
+                if slot is None:
+                    raise ValueError(f"SDO path {parsed.path!r} must be /ethercat/slave/<slot>/sdo.")
+                index = _first(query, "index")
+                if not index:
+                    raise ValueError("/ethercat/slave/<slot>/sdo requires ?index=<hex>.")
+                self._json(self.gateway.sdo_read(slot, index, _first(query, "subindex") or "0", _first(query, "value_type")))
             elif parsed.path == "/ethercat/subscriptions":
                 self._json(self.gateway.list_subscriptions())
             elif parsed.path == "/ethercat/events":
@@ -681,12 +731,21 @@ class GatewayHandler(BaseHTTPRequestHandler):
             elif parsed.path == "/ethercat/safe-off":
                 self._json(self.gateway.safe_off())
             elif parsed.path.startswith("/ethercat/slave/") and parsed.path.endswith("/sdo"):
+                slot = _sdo_slot(parsed.path)
+                if slot is None:
+                    raise ValueError(f"SDO path {parsed.path!r} must be /ethercat/slave/<slot>/sdo.")
+                if "index" not in payload:
+                    raise ValueError("SDO write payload needs index.")
+                if "value" not in payload:
+                    raise ValueError("SDO write payload needs value.")
                 self._json(
-                    {
-                        "ok": False,
-                        "status": "WARN",
-                        "message": "SDO access is part of the gateway API contract but not implemented by the CLI backend.",
-                    }
+                    self.gateway.sdo_write(
+                        slot,
+                        payload.get("index"),
+                        payload.get("subindex", "0"),
+                        payload.get("value"),
+                        value_type=payload.get("value_type"),
+                    )
                 )
             elif parsed.path == "/ethercat/subscriptions":
                 self._json(self.gateway.create_subscription(payload))
@@ -757,6 +816,44 @@ def _initial_value(parameter: RuntimeParameter) -> Any:
     if parameter.readable and not parameter.writable:
         return _default_safe_value(parameter.metadata, parameter.value_type)
     return parameter.safe_value
+
+
+def _sdo_slot(path: str) -> int | None:
+    """Return the slot from `/ethercat/slave/<slot>/sdo`, or None if malformed."""
+
+    parts = path.strip("/").split("/")
+    if len(parts) != 4 or parts[0] != "ethercat" or parts[1] != "slave" or parts[3] != "sdo":
+        return None
+    return int(parts[2]) if parts[2].isdigit() else None
+
+
+def _normalize_sdo_address(index: Any, subindex: Any = 0) -> tuple[int, int, str, str]:
+    """Normalize an SDO address to ``(index_int, subindex_int, index_hex, subindex_hex)``.
+
+    Mirrors the framework EtherCAT gateway contract: index/subindex may be ints,
+    ``0x``-prefixed strings or ESI-style ``#x`` notation; the canonical lowercase
+    hex strings (``0x1018``/``0x01``) are the stable wire and report form shared
+    with the Testknecht driver and the Signalzwerg gateway.
+    """
+
+    index_int = _coerce_sdo_number(index)
+    subindex_int = _coerce_sdo_number(subindex)
+    if not 0 <= index_int <= 0xFFFF:
+        raise ValueError(f"SDO index {index!r} is outside the 16-bit range.")
+    if not 0 <= subindex_int <= 0xFF:
+        raise ValueError(f"SDO subindex {subindex!r} is outside the 8-bit range.")
+    return index_int, subindex_int, f"0x{index_int:04x}", f"0x{subindex_int:02x}"
+
+
+def _coerce_sdo_number(value: Any) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"SDO address {value!r} must be an integer or hex string, not a bool.")
+    if isinstance(value, int):
+        return value
+    text = str(value).strip().lower().replace("#x", "0x")
+    if not text:
+        raise ValueError("SDO address must not be empty.")
+    return int(text, 0)
 
 
 def _coerce_value(value: Any, value_type: str) -> Any:

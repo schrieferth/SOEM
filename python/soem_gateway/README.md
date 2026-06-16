@@ -51,6 +51,8 @@ The Testknecht-facing EtherCAT namespace is also available:
 - `POST /ethercat/read-many`
 - `POST /ethercat/write`
 - `GET /ethercat/snapshot`
+- `GET /ethercat/slave/<slot>/sdo?index=<hex>&subindex=<hex>`
+- `POST /ethercat/slave/<slot>/sdo`
 - `POST /ethercat/safe-off`
 - `GET /ethercat/master/status`
 - `POST /ethercat/master/start`
@@ -99,6 +101,31 @@ The current implementation keeps a cached process image in Python. That makes
 the API contract testable and usable for moderate-rate evidence collection, but
 a later native helper should own hard real-time process-data exchange,
 watchdogs and high-rate event capture.
+
+## SDO Mailbox Access
+
+`GET/POST /ethercat/slave/<slot>/sdo` reaches the CoE object dictionary by slot
+plus a 16-bit index and 8-bit subindex, separate from the cyclic process image.
+Index/subindex accept ints, `0x..` or ESI-style `#x..` notation and are reported
+in canonical hex (`0x1018`/`0x01`).
+
+```sh
+curl 'http://127.0.0.1:8765/ethercat/slave/2/sdo?index=0x1018&subindex=0x01'   # Vendor ID
+curl -X POST http://127.0.0.1:8765/ethercat/slave/2/sdo \
+  -d '{"index": "0x8000", "subindex": "0x01", "value": 3}'
+```
+
+The gateway is a **dumb raw mailbox transport**: it stores and returns raw values
+for a `(slot, index, subindex)` address and reports the canonical hex address. It
+does not interpret object names, data types or read/write access — that lives on
+the Testknecht host, which owns the SDO object catalog and enforces read-only and
+unknown-object policy before any request reaches the gateway. Because the
+`simple_ng` sample does not expose CoE mailbox traffic yet, reads round-trip
+prior writes and an unseeded object reads back as `null`; a later native
+`ecx_SDO` backend can replace the raw store without changing this wire contract.
+The optional `value_type` query/body field tells the transport the size/type. This
+keeps the SOEM gateway and the Signalzwerg proxy presenting the same trivial SDO
+surface.
 
 ## Subscriptions
 

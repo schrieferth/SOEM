@@ -6,3 +6,6 @@ install
 tags
 .vscode
 .vs
+
+# Sphinx documentation build output
+docs/_build/
