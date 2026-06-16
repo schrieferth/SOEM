@@ -209,7 +209,10 @@ def run_gui(base_url: str = DEFAULT_URL, interface: str = "") -> int:
             log(f"[master] {line}")
 
     def on_action(label: str, data: dict[str, Any]) -> None:
-        ok = "ok" if data.get("ok") else "FAILED"
+        # Treat an explicit ok flag or a PASS status as success, so a response
+        # that only carries `status` is not mislabelled as failed.
+        succeeded = bool(data.get("ok")) or str(data.get("status", "")).upper() == "PASS"
+        ok = "ok" if succeeded else "FAILED"
         message = data.get("message") or data.get("error") or ""
         log(f"{label}: {ok} {('— ' + str(message)) if message else ''}".rstrip())
         # Always refresh status after an action so the panel reflects the change.

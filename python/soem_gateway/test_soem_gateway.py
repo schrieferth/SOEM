@@ -177,6 +177,7 @@ class ProcessDataTests(unittest.TestCase):
             # When the pdo server is available, the master is the real helper.
             self.assertEqual(gateway.identity()["process_data_backend"], "soem_pdo_server")
             started = gateway.start("eth0")
+            self.assertTrue(started["ok"])  # lifecycle responses must carry ok
             self.assertEqual(started["backend"], "soem_pdo_server")
             self.assertEqual(started["slaves"], 2)
             self.assertEqual(gateway.state.status()["master_status"], "RUNNING")

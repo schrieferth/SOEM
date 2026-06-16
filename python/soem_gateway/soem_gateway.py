@@ -675,7 +675,7 @@ class SoemGateway:
         if self.pdo.available():
             with self.state.lock:
                 if self.pdo.is_running():
-                    return {"status": "PASS", "message": "Process-data master already running.", "backend": "soem_pdo_server", **self.state.status()}
+                    return {"ok": True, "status": "PASS", "message": "Process-data master already running.", "backend": "soem_pdo_server", **self.state.status()}
             result = self.pdo.start(selected)
             with self.state.lock:
                 if result.get("ok"):
@@ -693,6 +693,7 @@ class SoemGateway:
                 else:
                     self.state.last_error = str(result.get("message") or result.get("error") or "bring-up failed")
             return {
+                "ok": bool(result.get("ok")),
                 "status": "PASS" if result.get("ok") else "FAIL",
                 "message": str(result.get("message") or "Process-data master start."),
                 "backend": "soem_pdo_server",
@@ -705,6 +706,7 @@ class SoemGateway:
         with self.state.lock:
             if self.state.process is not None and self.state.process.poll() is None:
                 return {
+                    "ok": True,
                     "status": "PASS",
                     "message": "SOEM master is already running.",
                     **self.state.status(),
@@ -724,7 +726,7 @@ class SoemGateway:
                 )
             except OSError as exc:
                 self.state.last_error = str(exc)
-                return {"status": "FAIL", "message": str(exc), "command": command}
+                return {"ok": False, "status": "FAIL", "message": str(exc), "command": command}
 
             self.state.process = process
             self.state.interface = selected
@@ -739,6 +741,7 @@ class SoemGateway:
         current_status = self.state.status()
         if not current_status["running"] and current_status["master_status"] == "FAILED":
             return {
+                "ok": False,
                 "status": "FAIL",
                 "message": "SOEM master process exited during startup.",
                 "command": command,
@@ -746,6 +749,7 @@ class SoemGateway:
             }
 
         return {
+            "ok": True,
             "status": "PASS",
             "message": "SOEM master process started.",
             "command": command,
