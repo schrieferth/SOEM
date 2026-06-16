@@ -8,7 +8,11 @@ boundary it keeps and why.
 `soem_gateway.py` supervises SOEM sample programs as separate processes:
 
 - `slaveinfo <interface>` — one-shot adapter/inventory probe; stdout is parsed.
-- `simple_ng <interface>` — cyclic master process; started/stopped as a child.
+- `soem_pdo_server <interface>` — real cyclic master with a line protocol
+  (`READ`/`WRITE`/`SAFE_OFF`/`STATUS`/`STOP`); started/stopped as a child and
+  driven for per-path process-data I/O.
+- `simple_ng <interface>` — legacy demo master (no per-path I/O), used only as a
+  fallback when `soem_pdo_server` is not built.
 
 It never imports SOEM, never links `libsoem`, and never embeds SOEM source. The
 only coupling is the process boundary (argv + standard streams). This keeps the

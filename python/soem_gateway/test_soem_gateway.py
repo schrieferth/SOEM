@@ -13,11 +13,50 @@ from __future__ import annotations
 from http.client import HTTPConnection
 import json
 from pathlib import Path
+import tempfile
 from threading import Thread
 import unittest
 from http.server import ThreadingHTTPServer
 
 from soem_gateway import GatewayConfig, GatewayHandler, SoemGateway
+
+
+# A standalone stand-in for the real soem_pdo_server C helper: same line protocol
+# (one JSON line per command), with a write->input loopback so READ after WRITE
+# observes the value, mirroring the EL2004->EL1014 bench loopback.
+_FAKE_PDO_SERVER = '''#!/usr/bin/env python3
+import json, sys
+inputs = [0] * 64
+outputs = [0] * 64
+print(json.dumps({"ok": True, "state": "running", "slaves": 2, "obytes": 1, "ibytes": 1, "expected_wkc": 3}), flush=True)
+for raw in sys.stdin:
+    parts = raw.split()
+    if not parts:
+        continue
+    cmd = parts[0]
+    if cmd == "STATUS":
+        print(json.dumps({"ok": True, "state": "running", "slaves": 2, "obytes": 1, "ibytes": 1, "expected_wkc": 3}), flush=True)
+    elif cmd == "READ" and len(parts) == 4:
+        path, byte, bit = parts[1], int(parts[2]), int(parts[3])
+        val = bool(inputs[byte] & (1 << bit))
+        print(json.dumps({"ok": True, "path": path, "value": val, "input_byte": inputs[byte], "byte": byte, "bit": bit}), flush=True)
+    elif cmd == "WRITE" and len(parts) == 5:
+        path, byte, bit, value = parts[1], int(parts[2]), int(parts[3]), parts[4] in ("1", "true", "True")
+        if value:
+            outputs[byte] |= (1 << bit); inputs[byte] |= (1 << bit)
+        else:
+            outputs[byte] &= ~(1 << bit); inputs[byte] &= ~(1 << bit)
+        print(json.dumps({"ok": True, "path": path, "value": value, "output_byte": outputs[byte], "byte": byte, "bit": bit}), flush=True)
+    elif cmd == "SAFE_OFF":
+        for i in range(len(outputs)):
+            outputs[i] = 0; inputs[i] = 0
+        print(json.dumps({"ok": True, "safe_off": True}), flush=True)
+    elif cmd == "STOP":
+        print(json.dumps({"ok": True, "stopped": True}), flush=True)
+        break
+    else:
+        print(json.dumps({"ok": False, "error": "unknown_command"}), flush=True)
+'''
 
 
 def _make_gateway() -> SoemGateway:
@@ -27,6 +66,7 @@ def _make_gateway() -> SoemGateway:
         port=0,
         simple_ng=Path("/nonexistent/simple_ng"),
         slaveinfo=Path("/nonexistent/slaveinfo"),
+        pdo_server=Path("/nonexistent/soem_pdo_server"),
         log_lines=50,
         start_with_sudo=False,
         inventory_with_sudo=False,
@@ -90,6 +130,69 @@ class SdoHttpTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=2)
+
+
+class ProcessDataTests(unittest.TestCase):
+    """Exercise the real per-path process-data path via a fake soem_pdo_server."""
+
+    def _gateway(self, tmp: str) -> SoemGateway:
+        helper = Path(tmp) / "fake_pdo_server.py"
+        helper.write_text(_FAKE_PDO_SERVER, encoding="utf-8")
+        helper.chmod(0o755)
+        config = GatewayConfig(
+            interface="eth0",
+            host="127.0.0.1",
+            port=0,
+            simple_ng=Path("/nonexistent/simple_ng"),
+            slaveinfo=Path("/nonexistent/slaveinfo"),
+            pdo_server=helper,
+            log_lines=50,
+            start_with_sudo=False,
+            inventory_with_sudo=False,
+        )
+        gateway = SoemGateway(config)
+        gateway.request_config(
+            {
+                "inventory": [{"slot": 2, "model": "EL2004"}, {"slot": 3, "model": "EL1014"}],
+                "catalog": {
+                    "parameters": [
+                        {"path": "ethercat.slot_2.el2004.output", "access": "write", "value_type": "bool", "process_byte_offset": 0, "process_bit_offset": 0},
+                        {"path": "ethercat.slot_3.el1014.input", "access": "read", "value_type": "bool", "process_byte_offset": 0, "process_bit_offset": 0},
+                    ]
+                },
+            }
+        )
+        return gateway
+
+    def test_start_write_read_loopback_safe_off_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            gateway = self._gateway(tmp)
+
+            # When the pdo server is available, the master is the real helper.
+            self.assertEqual(gateway.identity()["process_data_backend"], "soem_pdo_server")
+            started = gateway.start("eth0")
+            self.assertEqual(started["backend"], "soem_pdo_server")
+            self.assertEqual(started["slaves"], 2)
+            self.assertEqual(gateway.state.status()["master_status"], "RUNNING")
+
+            # Write the output high -> the fake loops it onto the input.
+            written = gateway.write({"path": "ethercat.slot_2.el2004.output", "value": True})
+            self.assertTrue(written["ok"])
+            self.assertEqual(written["quality"], "process_image")
+            self.assertEqual(written["output_byte"], 1)
+
+            read = gateway.read("ethercat.slot_3.el1014.input")
+            self.assertEqual(read["quality"], "process_image")
+            self.assertTrue(read["value"])
+
+            safe = gateway.safe_off()
+            self.assertIn("pdo", safe)
+            # After safe-off the looped input reads back low.
+            self.assertFalse(gateway.read("ethercat.slot_3.el1014.input")["value"])
+
+            stopped = gateway.stop()
+            self.assertTrue(stopped["ok"])
+            self.assertEqual(gateway.state.status()["master_status"], "STOPPED")
 
 
 if __name__ == "__main__":

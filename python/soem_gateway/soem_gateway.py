@@ -43,6 +43,7 @@ class GatewayConfig:
     port: int
     simple_ng: Path
     slaveinfo: Path
+    pdo_server: Path
     log_lines: int
     start_with_sudo: bool
     inventory_with_sudo: bool
@@ -210,11 +211,173 @@ class Subscription:
         return True
 
 
+class ProcessDataServer:
+    """Drives the external ``soem_pdo_server`` for real per-path process data.
+
+    Unlike ``simple_ng`` (a one-way demo that only prints iterations), the
+    ``soem_pdo_server`` sample is a real cyclic EtherCAT master with a line
+    protocol on stdin/stdout: it brings the bus to OPERATIONAL and then answers
+    ``READ``/``WRITE``/``SAFE_OFF``/``STATUS``/``STOP`` with one JSON line each.
+    Read/write address the process image by ``byte``/``bit`` offset, which the
+    Testknecht-generated runtime catalog already carries. This keeps the gateway
+    dumb (no naming/typing) while doing genuine hardware I/O.
+    """
+
+    def __init__(self, binary: Path, *, start_with_sudo: bool = False, timeout_s: float = 5.0) -> None:
+        self.binary = binary
+        self.start_with_sudo = start_with_sudo
+        self.timeout_s = float(timeout_s)
+        self.process: subprocess.Popen[str] | None = None
+        self.bringup: dict[str, Any] = {}
+        self.lock = threading.RLock()
+
+    def available(self) -> bool:
+        try:
+            return bool(self.binary) and Path(self.binary).exists()
+        except OSError:
+            return False
+
+    def is_running(self) -> bool:
+        return self.process is not None and self.process.poll() is None
+
+    def start(self, interface: str) -> dict[str, Any]:
+        with self.lock:
+            if self.is_running():
+                return {"ok": True, "status": "PASS", "message": "Process-data master already running.", **self.bringup}
+            command = [str(self.binary), interface]
+            if self.start_with_sudo:
+                command = ["sudo", *command]
+            try:
+                # stderr -> devnull keeps the stdout JSON channel clean of SOEM
+                # library diagnostics so responses stay parseable.
+                self.process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    bufsize=1,
+                )
+            except OSError as exc:
+                self.process = None
+                return {"ok": False, "status": "FAIL", "error": "pdo_start_failed", "message": str(exc), "command": command}
+            # The helper prints one bring-up status line after reaching
+            # OPERATIONAL (or a JSON error if init/slaves/operational failed).
+            self.bringup = _parse_pdo_line(self._readline())
+            if not self.bringup.get("ok"):
+                self._terminate()
+                return {"ok": False, "status": "FAIL", "error": "pdo_bringup_failed", "message": "Process-data bring-up failed.", "bringup": self.bringup, "command": command}
+            return {"ok": True, "status": "PASS", "message": "Process-data master running.", "command": command, **self.bringup}
+
+    def read(self, path: str, byte: int, bit: int) -> dict[str, Any]:
+        return self._command("READ", path, int(byte), int(bit))
+
+    def write(self, path: str, byte: int, bit: int, value: Any) -> dict[str, Any]:
+        return self._command("WRITE", path, int(byte), int(bit), 1 if _truthy_pdo(value) else 0)
+
+    def safe_off(self) -> dict[str, Any]:
+        return self._command("SAFE_OFF")
+
+    def status(self) -> dict[str, Any]:
+        return self._command("STATUS")
+
+    def stop(self, timeout_s: float = 3.0) -> dict[str, Any]:
+        with self.lock:
+            process = self.process
+            if process is None or process.poll() is not None:
+                self.process = None
+                return {"ok": True, "status": "PASS", "message": "Process-data master not running."}
+            try:
+                if process.stdin is not None:
+                    process.stdin.write("STOP\n")
+                    process.stdin.flush()
+                    self._readline()  # consume the {"ok":true,"stopped":true} line
+            except (OSError, ValueError):
+                pass
+        try:
+            process.wait(timeout=timeout_s)
+        except subprocess.TimeoutExpired:
+            self._terminate()
+        with self.lock:
+            _close_streams(process)
+            self.process = None
+        return {"ok": True, "status": "PASS", "message": "Process-data master stopped."}
+
+    def _command(self, *parts: Any) -> dict[str, Any]:
+        with self.lock:
+            process = self.process
+            if process is None or process.poll() is not None or process.stdin is None:
+                return {"ok": False, "status": "FAIL", "error": "pdo_not_running", "message": "Process-data master is not running."}
+            line = " ".join(str(part) for part in parts)
+            try:
+                process.stdin.write(line + "\n")
+                process.stdin.flush()
+            except (OSError, ValueError) as exc:
+                return {"ok": False, "status": "FAIL", "error": "pdo_write_failed", "message": str(exc)}
+            return _parse_pdo_line(self._readline())
+
+    def _readline(self) -> str:
+        process = self.process
+        if process is None or process.stdout is None:
+            return ""
+        return process.stdout.readline()
+
+    def _terminate(self) -> None:
+        process = self.process
+        if process is None:
+            return
+        process.terminate()
+        try:
+            process.wait(timeout=self.timeout_s)
+        except subprocess.TimeoutExpired:
+            process.kill()
+        _close_streams(process)
+        self.process = None
+
+
+def _close_streams(process: subprocess.Popen[str]) -> None:
+    """Close a helper's stdin/stdout pipes to avoid leaking file descriptors."""
+
+    for stream in (process.stdin, process.stdout):
+        try:
+            if stream is not None:
+                stream.close()
+        except OSError:
+            pass
+
+
+def _parse_pdo_line(line: str) -> dict[str, Any]:
+    """Parse one JSON response line from soem_pdo_server."""
+
+    text = (line or "").strip()
+    if not text:
+        return {"ok": False, "status": "FAIL", "error": "pdo_no_response", "message": "No response from process-data master."}
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return {"ok": False, "status": "FAIL", "error": "pdo_invalid_response", "message": text[:200]}
+    return data if isinstance(data, dict) else {"ok": False, "status": "FAIL", "error": "pdo_invalid_response"}
+
+
+def _truthy_pdo(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on", "high"}
+    return bool(value)
+
+
+def _process_offsets(parameter: "RuntimeParameter") -> tuple[int, int]:
+    """Return the (byte, bit) process-image offset the host put in the catalog."""
+
+    meta = parameter.metadata if isinstance(parameter.metadata, dict) else {}
+    return int(meta.get("process_byte_offset", 0) or 0), int(meta.get("process_bit_offset", 0) or 0)
+
+
 class SoemGateway:
     def __init__(self, config: GatewayConfig) -> None:
         self.config = config
         self.state = MasterState(interface=config.interface)
         self.runtime = RuntimeConfig()
+        self.pdo = ProcessDataServer(config.pdo_server, start_with_sudo=config.start_with_sudo)
         self.process_values: dict[str, Any] = {}
         # Raw SDO value store keyed by slot, then (index, subindex). The gateway
         # is a dumb mailbox transport: it holds only raw values, no object names,
@@ -234,6 +397,8 @@ class SoemGateway:
             "interface": self.config.interface,
             "simple_ng": str(self.config.simple_ng),
             "slaveinfo": str(self.config.slaveinfo),
+            "pdo_server": str(self.config.pdo_server),
+            "process_data": "soem_pdo_server" if self.pdo.available() else "cached_image",
             "runtime_configured": self.runtime.configured_at is not None,
         }
 
@@ -244,8 +409,10 @@ class SoemGateway:
             "gateway": "soem-python-gateway",
             "backend": "external_soem_cli",
             "license_boundary": "SOEM is supervised as an external executable.",
+            "process_data_backend": "soem_pdo_server" if self.pdo.available() else "cached_image",
             "simple_ng": str(self.config.simple_ng),
             "slaveinfo": str(self.config.slaveinfo),
+            "pdo_server": str(self.config.pdo_server),
         }
 
     def adapters(self) -> dict[str, Any]:
@@ -311,6 +478,22 @@ class SoemGateway:
             parameter = self._require_parameter(path)
             if not parameter.readable and not parameter.writable:
                 raise ValueError(f"EtherCAT path {path!r} is not readable.")
+            if self.pdo.is_running():
+                # Real input bit from the live process image via soem_pdo_server.
+                byte, bit = _process_offsets(parameter)
+                response = self.pdo.read(path, byte, bit)
+                if response.get("ok") and "value" in response:
+                    self.process_values[path] = response["value"]
+                    return {
+                        "ok": True,
+                        "status": "PASS",
+                        "path": path,
+                        "value": response["value"],
+                        "input_byte": response.get("input_byte"),
+                        "quality": "process_image",
+                        "metadata": parameter.metadata,
+                    }
+                return {"ok": False, "status": "FAIL", "path": path, "quality": "process_image", **response}
             return {
                 "ok": True,
                 "status": "PASS",
@@ -340,6 +523,25 @@ class SoemGateway:
                 raise ValueError(f"EtherCAT path {path!r} is not writable.")
             coerced = _coerce_value(value, parameter.value_type)
             old_value = self.process_values.get(path, _initial_value(parameter))
+            if self.pdo.is_running():
+                # Real output bit on the live process image via soem_pdo_server.
+                byte, bit = _process_offsets(parameter)
+                response = self.pdo.write(path, byte, bit, coerced)
+                if not response.get("ok"):
+                    return {"ok": False, "status": "FAIL", "path": path, "quality": "process_image", **response}
+                new_value = response.get("value", coerced)
+                self.process_values[path] = new_value
+                emitted = self._emit_value_change_locked(path, old_value, new_value, reason="write")
+                return {
+                    "ok": True,
+                    "status": "PASS",
+                    "path": path,
+                    "value": new_value,
+                    "old_value": old_value,
+                    "events_emitted": emitted,
+                    "output_byte": response.get("output_byte"),
+                    "quality": "process_image",
+                }
             self.process_values[path] = coerced
             emitted = self._emit_value_change_locked(path, old_value, coerced, reason="write")
             return {
@@ -355,6 +557,9 @@ class SoemGateway:
     def safe_off(self) -> dict[str, Any]:
         changed: list[dict[str, Any]] = []
         with self.runtime_lock:
+            # Clear the real output image first when the master runs, then mirror
+            # the safe values into the cached image and emit evidence.
+            pdo_result = self.pdo.safe_off() if self.pdo.is_running() else None
             for path, parameter in self.runtime.parameters.items():
                 if not parameter.writable:
                     continue
@@ -364,12 +569,16 @@ class SoemGateway:
                 emitted = self._emit_value_change_locked(path, old_value, new_value, reason="safe_off")
                 changed.append({"path": path, "old_value": old_value, "value": new_value, "events_emitted": emitted})
             self._append_event_locked("gateway.safe_off", None, True, quality="good", reason="safe_off")
-        return {
+        result: dict[str, Any] = {
             "ok": True,
             "status": "PASS",
             "message": "Safe-off values applied to writable runtime paths.",
             "changed": changed,
         }
+        if pdo_result is not None:
+            result["pdo"] = pdo_result
+            result["quality"] = "process_image"
+        return result
 
     def snapshot(self) -> dict[str, Any]:
         with self.runtime_lock:
@@ -460,6 +669,38 @@ class SoemGateway:
 
     def start(self, interface: str | None = None) -> dict[str, Any]:
         selected = self._resolve_interface(interface)
+
+        # Preferred path: the real cyclic process-data master with per-path I/O.
+        if self.pdo.available():
+            with self.state.lock:
+                if self.pdo.is_running():
+                    return {"status": "PASS", "message": "Process-data master already running.", "backend": "soem_pdo_server", **self.state.status()}
+            result = self.pdo.start(selected)
+            with self.state.lock:
+                if result.get("ok"):
+                    # Point state at the helper process so status() reports RUNNING.
+                    # No log-collector thread is started: the helper's stdout is the
+                    # command/response channel, owned by ProcessDataServer.
+                    self.state.process = self.pdo.process
+                    self.state.interface = selected
+                    self.state.started_at = time.time()
+                    self.state.stopped_at = None
+                    self.state.last_returncode = None
+                    self.state.last_error = None
+                    self.state.log.clear()
+                    self.state.append_log(json.dumps(result))
+                else:
+                    self.state.last_error = str(result.get("message") or result.get("error") or "bring-up failed")
+            return {
+                "status": "PASS" if result.get("ok") else "FAIL",
+                "message": str(result.get("message") or "Process-data master start."),
+                "backend": "soem_pdo_server",
+                "command": result.get("command"),
+                **{k: result[k] for k in ("slaves", "obytes", "ibytes", "expected_wkc", "bringup") if k in result},
+                **self.state.status(),
+            }
+
+        # Legacy/demo path: simple_ng (prints iterations, no per-path I/O).
         with self.state.lock:
             if self.state.process is not None and self.state.process.poll() is None:
                 return {
@@ -511,6 +752,16 @@ class SoemGateway:
         }
 
     def stop(self, timeout_s: float = 3.0) -> dict[str, Any]:
+        # Preferred path: ask the process-data master to safe-off and stop cleanly.
+        if self.pdo.is_running():
+            result = self.pdo.stop(timeout_s=timeout_s)
+            with self.state.lock:
+                if self.state.process is not None:
+                    self.state.last_returncode = self.state.process.poll()
+                self.state.process = None
+                self.state.stopped_at = time.time()
+            return {"status": "PASS", "ok": True, "message": "Process-data master stopped.", "backend": "soem_pdo_server", **result, **self.state.status()}
+
         with self.state.lock:
             process = self.state.process
             if process is None or process.poll() is not None:
@@ -966,8 +1217,9 @@ def _parse_args(argv: list[str]) -> GatewayConfig:
     parser.add_argument("--interface", help="EtherCAT network interface, for example en6 or eth0.")
     parser.add_argument("--host", default="127.0.0.1", help="HTTP bind host.")
     parser.add_argument("--port", type=int, default=8765, help="HTTP bind port.")
-    parser.add_argument("--simple-ng", type=Path, default=_default_binary("simple_ng"), help="Path to simple_ng executable.")
+    parser.add_argument("--simple-ng", type=Path, default=_default_binary("simple_ng"), help="Path to simple_ng executable (legacy demo master).")
     parser.add_argument("--slaveinfo", type=Path, default=_default_binary("slaveinfo"), help="Path to slaveinfo executable.")
+    parser.add_argument("--pdo-server", type=Path, default=_default_binary("soem_pdo_server"), help="Path to soem_pdo_server (real cyclic process-data master). Preferred over simple_ng when present.")
     parser.add_argument("--log-lines", type=int, default=DEFAULT_LOG_LINES, help="Number of master log lines to keep.")
     parser.add_argument("--start-with-sudo", action="store_true", help="Start simple_ng through sudo.")
     parser.add_argument("--inventory-with-sudo", action="store_true", help="Run slaveinfo inventory through sudo.")
@@ -978,6 +1230,7 @@ def _parse_args(argv: list[str]) -> GatewayConfig:
         port=args.port,
         simple_ng=args.simple_ng,
         slaveinfo=args.slaveinfo,
+        pdo_server=args.pdo_server,
         log_lines=args.log_lines,
         start_with_sudo=args.start_with_sudo,
         inventory_with_sudo=args.inventory_with_sudo,
@@ -994,6 +1247,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"SOEM gateway listening on http://{config.host}:{config.port}")
     print(f"slaveinfo={config.slaveinfo}")
     print(f"simple_ng={config.simple_ng}")
+    print(f"pdo_server={config.pdo_server} (process_data={'soem_pdo_server' if gateway.pdo.available() else 'cached_image'})")
     try:
         server.serve_forever()
     except KeyboardInterrupt:

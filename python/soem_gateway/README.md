@@ -97,10 +97,14 @@ gateway subscription/event state. Reads and writes are accepted only for paths
 that exist in the loaded runtime configuration. `POST /ethercat/safe-off`
 applies the configured `safe_value` to every writable path.
 
-The current implementation keeps a cached process image in Python. That makes
-the API contract testable and usable for moderate-rate evidence collection, but
-a later native helper should own hard real-time process-data exchange,
-watchdogs and high-rate event capture.
+When the `soem_pdo_server` helper is available, the gateway drives **real**
+per-path process data: `start` brings the bus to OPERATIONAL through the helper,
+and `read`/`write`/`safe-off` exchange actual input/output bits on the live
+process image (addressed by the catalog's `process_byte_offset`/`process_bit_offset`).
+Without the helper it falls back to `simple_ng` (a demo master) plus a cached
+process image, which keeps the API testable. A later native helper can still take
+over hard real-time exchange, watchdogs and high-rate capture behind the same
+contract.
 
 ## SDO Mailbox Access
 

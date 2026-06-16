@@ -23,6 +23,7 @@ def _start_gateway():
         port=0,
         simple_ng=Path("/nonexistent/simple_ng"),
         slaveinfo=Path("/nonexistent/slaveinfo"),
+        pdo_server=Path("/nonexistent/soem_pdo_server"),
         log_lines=50,
         start_with_sudo=False,
         inventory_with_sudo=False,

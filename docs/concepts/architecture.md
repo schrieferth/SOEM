@@ -11,7 +11,7 @@ gateway supervises the SOEM sample binaries.
 flowchart TD
     A["Automation host (e.g. Testknecht)\nowns ESI/catalog interpretation,\nSDO object catalog, safety, evidence"]
     B["soem_gateway.py\nHTTP/JSON server\nsupervises external SOEM binaries"]
-    C["SOEM sample binaries\nslaveinfo, simple_ng"]
+    C["SOEM sample binaries\nslaveinfo, soem_pdo_server"]
     D["SOEM master core\n(CoE/FoE/SoE/EoE, process data)"]
     E["NIC backend\nLinux raw socket / Darwin BPF"]
     F["EtherCAT segment\ncoupler + terminals"]

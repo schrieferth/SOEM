@@ -34,9 +34,11 @@ cmake --preset darwin-x86_64
 cmake --build --preset darwin-x86_64
 ```
 
-The gateway auto-discovers the resulting binaries (see
+The build includes the Testknecht helpers `soem_pdo_server` (the real cyclic
+process-data master used for per-path I/O) and `soem_do_di_once`, which are
+SOEM samples in this fork. The gateway auto-discovers the resulting binaries (see
 [Binary discovery](#binary-discovery)); you can also point at them explicitly with
-`--slaveinfo` and `--simple-ng`.
+`--slaveinfo`, `--simple-ng` and `--pdo-server`.
 
 ## Binary discovery
 

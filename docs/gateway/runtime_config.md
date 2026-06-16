@@ -73,9 +73,17 @@ Each parameter declares:
 `GET /ethercat/catalog` returns the accepted catalog;
 `GET /ethercat/snapshot` returns the catalog plus the current cached values.
 
-## Note
+## Real process data vs cached fallback
 
-The cached process image makes the contract testable and usable for
-moderate-rate evidence. A native helper should own deterministic real-time
-process-data exchange, watchdogs and high-rate capture later, behind the same
-HTTP contract. See [ADR-002](../adr/ADR-002-external-process-gateway-boundary.md).
+When the `soem_pdo_server` helper is present, the gateway does **real** per-path
+I/O: `master/start` brings the bus to OPERATIONAL through the helper, and
+`read`/`write`/`safe-off` exchange actual input/output bits on the live process
+image using the catalog's `process_byte_offset`/`process_bit_offset`. Responses
+then carry `"quality": "process_image"`.
+
+Without the helper the gateway falls back to `simple_ng` (a demo master) plus a
+cached process image (`"quality": "cached_process_image"`), which keeps the
+contract testable. A later native helper can still take over hard real-time
+exchange, watchdogs and high-rate capture behind the same HTTP contract. See
+[ADR-002](../adr/ADR-002-external-process-gateway-boundary.md) and
+[Usage](usage.md).

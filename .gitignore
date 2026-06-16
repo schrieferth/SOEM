@@ -9,3 +9,5 @@ tags
 
 # Sphinx documentation build output
 docs/_build/
+__pycache__/
+*.pyc

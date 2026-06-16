@@ -169,6 +169,11 @@ if(SOEM_BUILD_SAMPLES)
   add_subdirectory(samples/firm_update)
   add_subdirectory(samples/simple_ng)
   add_subdirectory(samples/slaveinfo)
+  # Testknecht helpers: cyclic process-data line-protocol server and a one-shot
+  # digital-out/digital-in tool. The SOEM Python gateway supervises
+  # soem_pdo_server for real per-path read/write over the process image.
+  add_subdirectory(samples/soem_pdo_server)
+  add_subdirectory(samples/soem_do_di_once)
 
   if (${CMAKE_SYSTEM_NAME} STREQUAL Linux)
     add_subdirectory(samples/eoe_test)

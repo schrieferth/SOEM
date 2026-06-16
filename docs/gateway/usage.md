@@ -11,13 +11,20 @@ python3 python/soem_gateway/soem_gateway.py [options]
 | `--interface <name>` | none | EtherCAT NIC, e.g. `en6` (macOS) or `eth0` (Linux). Can also be passed per request. |
 | `--host <addr>` | `127.0.0.1` | HTTP bind host. |
 | `--port <n>` | `8765` | HTTP bind port. |
-| `--simple-ng <path>` | auto-discovered | Path to the `simple_ng` cyclic-master binary. |
+| `--pdo-server <path>` | auto-discovered | Path to `soem_pdo_server` (real cyclic process-data master). Preferred over `simple_ng` when present. |
+| `--simple-ng <path>` | auto-discovered | Path to the `simple_ng` binary (legacy demo master, no per-path I/O). |
 | `--slaveinfo <path>` | auto-discovered | Path to the `slaveinfo` inventory binary. |
 | `--log-lines <n>` | `300` | Number of master log lines to retain. |
 | `--start-with-sudo` | off | Start `simple_ng` through `sudo`. |
 | `--inventory-with-sudo` | off | Run `slaveinfo` inventory through `sudo`. |
 
-On start the gateway prints its bind address and the resolved binary paths.
+On start the gateway prints its bind address and the resolved binary paths,
+including which process-data backend is active (`soem_pdo_server` or the
+`cached_image` fallback).
+
+`master/start` prefers `soem_pdo_server` (real per-path I/O) whenever its binary
+is present, and only falls back to `simple_ng` (demo, no I/O) otherwise.
+`/identity` and `/health` report the active `process_data` backend.
 
 ## Privilege model
 
