@@ -73,16 +73,26 @@ and, with the incident it came from, in `.ai/facts/incidents.yaml`.
 9. **Cross-repo rule changes travel together.** An AI rule, workflow, styleguide or convention
    added in one repository is applied to the others in the same session. Run
    `python3 .github/scripts/check_ai_sync.py` afterwards.
-10. **Run each relevant test suite once per unchanged change set.** Use CI variables locally
-    by default. Reuse successful tests and guards before commit/push; rerun only failed, newly
-    required or affected checks when their covered code, tests, dependencies, configuration or
-    execution environment changes. Run both local and CI environments only when explicitly
-    requested for diagnosis (`tools/preflight.py --both-environments`).
-11. **Every AI-started test run must be visible in the IDE.** Start pytest only through
-    `pyTestknecht/tools/ide_pytest.py`. Its versioned start, progress, output and consolidated
-    completion events are published to `pyTestknecht/.testknecht/ide-progress.jsonl` and mirrored
-    into the `Testknecht Test Explorer` output channel. Do not run pytest directly. Add equivalent
-    bridge support before using another test runner; non-test read-only guards are exempt.
+10. **Run the smallest justified test selection, not a suite by habit.** Select the directly
+    affected test nodes and state what risk each one covers. Run a broader file or suite only when
+    cross-cutting behavior, collection/fixture effects, packaging, or an explicit release gate
+    makes it necessary; explain that necessity before starting it. Reuse unchanged evidence and
+    never rerun unrelated tests merely for commit/push.
+11. **Every AI-started test run is visible and produces a report.** Start pytest only through
+    `pyTestknecht/tools/ide_pytest.py`; it mirrors start, progress, diagnostics and completion into
+    the `Testknecht Test Explorer` output channel and writes a durable JUnit report below
+    `pyTestknecht/.testknecht/ai-test-reports/`. Testknecht plan runs use the permanent operator
+    server on port `1111`, remain observable on `/run_view`, and produce the canonical Testknecht
+    report. Do not start or advertise another user-facing test/live/report port. Add equivalent
+    progress and report support before using another test runner; non-test read-only guards are
+    exempt.
+12. **Root cause before remedy; no quick fixes.** Establish the evidence chain from symptom to
+    violated contract and owning defect before changing behavior. Fix the owning boundary with the
+    clean target architecture and a regression test that fails for the original cause. Do not
+    substitute retries, sleeps, swallowed errors, disabled checks, compatibility shims or local
+    workarounds unless they are the technically correct long-term design and are documented as
+    such. Use current primary sources when external technology affects the design, and state any
+    residual uncertainty or risk explicitly.
 
 ## Rule sources beyond this file
 
